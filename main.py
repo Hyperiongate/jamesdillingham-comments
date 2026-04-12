@@ -21,7 +21,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "Jim@shift-work.com")
 APPROVE_SECRET = os.environ.get("APPROVE_SECRET", "cheapseats2026")
 BASE_URL = os.environ.get("BASE_URL", "https://jamesdillingham-comments.onrender.com")
-FORMSPREE_URL = os.environ.get("FORMSPREE_URL", "https://formspree.io/f/xwvwnwea")
+FORMSPREE_URL = os.environ.get("FORMSPREE_URL", "https://formspree.io/f/xzdypeyp")
 
 
 def get_conn():
