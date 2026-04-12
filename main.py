@@ -1,13 +1,12 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
 import psycopg2
 import psycopg2.extras
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import urllib.request
+import urllib.parse
+import json
 
 app = FastAPI()
 
@@ -20,12 +19,9 @@ app.add_middleware(
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "Jim@shift-work.com")
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASS = os.environ.get("SMTP_PASS")
-APPROVE_SECRET = os.environ.get("APPROVE_SECRET", "changeme")
-BASE_URL = os.environ.get("BASE_URL", "https://comments-api.onrender.com")
+APPROVE_SECRET = os.environ.get("APPROVE_SECRET", "cheapseats2026")
+BASE_URL = os.environ.get("BASE_URL", "https://jamesdillingham-comments.onrender.com")
+FORMSPREE_URL = os.environ.get("FORMSPREE_URL", "https://formspree.io/f/xwvwnwea")
 
 
 def get_conn():
@@ -62,42 +58,29 @@ class CommentIn(BaseModel):
 
 
 def send_notification(comment_id: int, post_slug: str, name: str, body: str):
-    if not SMTP_USER or not SMTP_PASS:
-        print("SMTP not configured — skipping email notification")
-        return
-
     approve_url = f"{BASE_URL}/approve?id={comment_id}&secret={APPROVE_SECRET}"
     reject_url = f"{BASE_URL}/reject?id={comment_id}&secret={APPROVE_SECRET}"
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"New comment on '{post_slug}' — View from the Cheap Seats"
-    msg["From"] = SMTP_USER
-    msg["To"] = NOTIFY_EMAIL
-
-    html = f"""
-    <h2>New comment on post: <em>{post_slug}</em></h2>
-    <p><strong>From:</strong> {name}</p>
-    <p><strong>Comment:</strong><br>{body}</p>
-    <br>
-    <p>
-      <a href="{approve_url}" style="background:#c0392b;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;margin-right:10px;">
-        ✓ Approve
-      </a>
-      <a href="{reject_url}" style="background:#666;color:white;padding:10px 20px;text-decoration:none;border-radius:4px;">
-        ✗ Reject
-      </a>
-    </p>
-    """
-
-    msg.attach(MIMEText(html, "html"))
-
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, NOTIFY_EMAIL, msg.as_string())
+        payload = json.dumps({
+            "email": NOTIFY_EMAIL,
+            "_subject": f"New comment on '{post_slug}' — View from the Cheap Seats",
+            "name": name,
+            "post": post_slug,
+            "comment": body,
+            "approve_link": approve_url,
+            "reject_link": reject_url
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            FORMSPREE_URL,
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"}
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print(f"Notification sent via Formspree for comment {comment_id}")
     except Exception as e:
-        print(f"Email error: {e}")
+        print(f"Formspree notification error: {e}")
 
 
 @app.post("/comments")
