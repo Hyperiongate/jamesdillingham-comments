@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 import psycopg2
 import psycopg2.extras
@@ -22,6 +23,7 @@ NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "Jim@shift-work.com")
 APPROVE_SECRET = os.environ.get("APPROVE_SECRET", "cheapseats2026")
 BASE_URL = os.environ.get("BASE_URL", "https://jamesdillingham-comments.onrender.com")
 FORMSPREE_URL = os.environ.get("FORMSPREE_URL", "https://formspree.io/f/xzdypeyp")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 
 def get_conn():
@@ -32,7 +34,6 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # Existing comments table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS comments (
             id SERIAL PRIMARY KEY,
@@ -45,7 +46,6 @@ def init_db():
         )
     """)
 
-    # New gratitude table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gratitude (
             id SERIAL PRIMARY KEY,
@@ -64,7 +64,7 @@ def init_db():
 init_db()
 
 
-# ── EXISTING MODELS ──────────────────────────────────────────────
+# ── MODELS ───────────────────────────────────────────────────────
 
 class CommentIn(BaseModel):
     post_slug: str
@@ -73,15 +73,13 @@ class CommentIn(BaseModel):
     body: str
 
 
-# ── NEW GRATITUDE MODEL ──────────────────────────────────────────
-
 class GratitudeIn(BaseModel):
     gratitude_text: str
     author_name: str | None = None
     category: str | None = None
 
 
-# ── EXISTING HELPERS ─────────────────────────────────────────────
+# ── HELPERS ──────────────────────────────────────────────────────
 
 def send_notification(comment_id: int, post_slug: str, name: str, body: str):
     approve_url = f"{BASE_URL}/approve?id={comment_id}&secret={APPROVE_SECRET}"
@@ -109,7 +107,7 @@ def send_notification(comment_id: int, post_slug: str, name: str, body: str):
         print(f"Formspree notification error: {e}")
 
 
-# ── EXISTING COMMENT ENDPOINTS ───────────────────────────────────
+# ── COMMENT ENDPOINTS ─────────────────────────────────────────────
 
 @app.post("/comments")
 def submit_comment(comment: CommentIn):
@@ -172,7 +170,7 @@ def reject_comment(id: int = Query(...), secret: str = Query(...)):
     return {"status": "rejected", "id": id}
 
 
-# ── NEW GRATITUDE ENDPOINTS ──────────────────────────────────────
+# ── GRATITUDE ENDPOINTS ───────────────────────────────────────────
 
 @app.get("/gratitude")
 def get_gratitude():
@@ -207,6 +205,73 @@ def submit_gratitude(entry: GratitudeIn):
     conn.close()
 
     return {"status": "ok", "id": new_id}
+
+
+# ── LESSON ENDPOINT ───────────────────────────────────────────────
+
+LESSON_SYSTEM_PROMPT = """You write crisp, intelligent short lessons. Pick ONE genuinely interesting topic completely at random from any domain: history, science, mathematics, language, food, psychology, geography, music, economics, nature, technology, philosophy, art, medicine, engineering, or anything else. Then write a compelling lesson about it in 300 words or fewer.
+
+Return ONLY a JSON object with no markdown fences, no preamble:
+{
+  "category": "short category label (e.g. 'Natural Science', 'History', 'Psychology')",
+  "title": "A sharp, specific title for the lesson",
+  "paragraphs": ["paragraph 1", "paragraph 2", "paragraph 3"],
+  "takeaway": "One memorable sentence the reader will remember tomorrow."
+}
+
+Rules:
+- The topic must be genuinely random and varied across every possible domain. Surprise the reader.
+- Total word count across all paragraphs must be 300 words or fewer.
+- 3-4 paragraphs, each 60-90 words. Engaging, clear, no fluff.
+- No bullet points. Prose only.
+- The takeaway is a single elegant sentence.
+- Return only the JSON object, nothing else."""
+
+
+@app.post("/lesson")
+def generate_lesson():
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="Lesson service not configured.")
+
+    try:
+        payload = json.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1000,
+            "system": LESSON_SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": "Give me a random lesson."}]
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        text = "".join(block.get("text", "") for block in data.get("content", []))
+        clean = text.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        lesson = json.loads(clean)
+        return lesson
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+        print(f"Anthropic API error {e.code}: {error_body}")
+        raise HTTPException(status_code=502, detail="Lesson generation failed.")
+    except Exception as e:
+        print(f"Lesson endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Lesson generation failed.")
+
+
+# ── ROBOTS ───────────────────────────────────────────────────────
+
+@app.get("/robots.txt")
+def robots():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
 # ── HEALTH ───────────────────────────────────────────────────────
