@@ -22,7 +22,6 @@ NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "Jim@shift-work.com")
 APPROVE_SECRET = os.environ.get("APPROVE_SECRET", "cheapseats2026")
 BASE_URL = os.environ.get("BASE_URL", "https://jamesdillingham-comments.onrender.com")
 FORMSPREE_URL = os.environ.get("FORMSPREE_URL", "https://formspree.io/f/xzdypeyp")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 
 def get_conn():
@@ -32,6 +31,8 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+
+    # Existing comments table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS comments (
             id SERIAL PRIMARY KEY,
@@ -43,6 +44,18 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+
+    # New gratitude table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS gratitude (
+            id SERIAL PRIMARY KEY,
+            gratitude_text TEXT NOT NULL,
+            author_name TEXT,
+            category TEXT,
+            timestamp TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -51,12 +64,24 @@ def init_db():
 init_db()
 
 
+# ── EXISTING MODELS ──────────────────────────────────────────────
+
 class CommentIn(BaseModel):
     post_slug: str
     name: str
     email: str = ""
     body: str
 
+
+# ── NEW GRATITUDE MODEL ──────────────────────────────────────────
+
+class GratitudeIn(BaseModel):
+    gratitude_text: str
+    author_name: str | None = None
+    category: str | None = None
+
+
+# ── EXISTING HELPERS ─────────────────────────────────────────────
 
 def send_notification(comment_id: int, post_slug: str, name: str, body: str):
     approve_url = f"{BASE_URL}/approve?id={comment_id}&secret={APPROVE_SECRET}"
@@ -83,6 +108,8 @@ def send_notification(comment_id: int, post_slug: str, name: str, body: str):
     except Exception as e:
         print(f"Formspree notification error: {e}")
 
+
+# ── EXISTING COMMENT ENDPOINTS ───────────────────────────────────
 
 @app.post("/comments")
 def submit_comment(comment: CommentIn):
@@ -145,67 +172,45 @@ def reject_comment(id: int = Query(...), secret: str = Query(...)):
     return {"status": "rejected", "id": id}
 
 
+# ── NEW GRATITUDE ENDPOINTS ──────────────────────────────────────
+
+@app.get("/gratitude")
+def get_gratitude():
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        "SELECT id, gratitude_text, author_name, category, timestamp FROM gratitude ORDER BY timestamp DESC LIMIT 500"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {"entries": [dict(r) for r in rows]}
+
+
+@app.post("/gratitude")
+def submit_gratitude(entry: GratitudeIn):
+    text = (entry.gratitude_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Gratitude text is required.")
+    if len(text) > 500:
+        raise HTTPException(status_code=400, detail="Entry must be 500 characters or fewer.")
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO gratitude (gratitude_text, author_name, category) VALUES (%s, %s, %s) RETURNING id",
+        (text, entry.author_name, entry.category)
+    )
+    new_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {"status": "ok", "id": new_id}
+
+
+# ── HEALTH ───────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-# ── /lesson proxy ──────────────────────────────────────────────
-# Securely proxies requests to the Anthropic API so the key never
-# lives in the browser or the static site repo.
-
-@app.post("/lesson")
-def generate_lesson():
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=503, detail="Lesson service not configured.")
-
-    system_prompt = (
-        "You write crisp, intelligent short lessons. Pick ONE genuinely interesting topic "
-        "completely at random from any domain: history, science, mathematics, language, food, "
-        "psychology, geography, music, economics, nature, technology, philosophy, art, medicine, "
-        "engineering, or anything else. Then write a compelling lesson about it in 300 words or fewer.\n\n"
-        "Return ONLY a JSON object with no markdown fences, no preamble:\n"
-        "{\n"
-        '  "category": "short category label (e.g. \'Natural Science\', \'History\', \'Psychology\')",\n'
-        '  "title": "A sharp, specific title for the lesson",\n'
-        '  "paragraphs": ["paragraph 1", "paragraph 2", "paragraph 3"],\n'
-        '  "takeaway": "One memorable sentence the reader will remember tomorrow."\n'
-        "}\n\n"
-        "Rules:\n"
-        "- The topic must be genuinely random and varied. Surprise the reader.\n"
-        "- Total word count across all paragraphs must be 300 words or fewer.\n"
-        "- 3-4 paragraphs, each 60-90 words. Engaging, clear, no fluff.\n"
-        "- No bullet points. Prose only.\n"
-        "- The takeaway is a single elegant sentence.\n"
-        "- Return only the JSON object, nothing else."
-    )
-
-    payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 1000,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": "Give me a random lesson."}]
-    }).encode("utf-8")
-
-    try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        text = "".join(block.get("text", "") for block in data.get("content", []))
-        clean = text.replace("```json", "").replace("```", "").strip()
-        lesson = json.loads(clean)
-        return lesson
-
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=502, detail=f"Could not parse lesson JSON: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Lesson generation failed: {e}")
